@@ -8,7 +8,7 @@
 // 2 - high logging - log almost everything
 // 3 - max logging - log everything
 // default: 1
-var logging = 1;
+var logging = 3;
 
 // Authentication
 // Since this is stored in plain text, do not use a password you use elsewhere - this is
@@ -75,6 +75,7 @@ handlers.common = function(req, res) {
         req.socket.remoteAddress ||
         req.connection.socket.remoteAddress;
     if (logging >= 3) console.log(ip + " requested " + req.url);
+    return ip;
 };
 
 handlers.root = function(req, res) {
@@ -84,12 +85,7 @@ handlers.root = function(req, res) {
 };
 
 handlers.swarmlist = function(req, res) {
-    handlers.common(req, res);
-    //res.send("swarm list requested")
-    var ip = req.headers['x-forwarded-for'] ||
-        req.connection.remoteAddress ||
-        req.socket.remoteAddress ||
-        req.connection.socket.remoteAddress;
+    var ip = handlers.common(req, res);
     res.send({
         success: Object.keys(db)
     });
@@ -103,11 +99,24 @@ handlers.swarminfo = function(req, res) {
 
 handlers.swarmcommand = function(req, res) {
     handlers.common(req, res);
-    //res.send("swarm command requested");
     var ip = req.headers['x-forwarded-for'] ||
         req.connection.remoteAddress ||
         req.socket.remoteAddress ||
         req.connection.socket.remoteAddress;
+    var checks = function() {
+        if (auth_token && auth_token != req.query.token) {
+            res.send({
+                error: "invalid token"
+            });
+            return false;
+        } else if (iplock && ip != db[req.params.swarmid].ip) {
+            res.send({
+                error: "ip mismatch"
+            });
+            return false;
+        }
+        return true;
+    }
     switch (req.params.swarmcommand) {
         // create a new swarm entry in the database
         case "create":
@@ -124,31 +133,32 @@ handlers.swarmcommand = function(req, res) {
                     });
                     break;
                 }
-                if (!req.query.w || !req.query.h) {
+                if (!req.query.width || !req.query.length) {
                     res.send({
                         error: "missing parameters"
                     });
                     break;
                 }
                 db[req.params.swarmid] = {};
-                var temp = {};
-                temp.time_created = new Date().getTime();
-                temp.w = req.query.w;
-                temp.h = req.query.h;
-                temp.ip = ip;
+                var swarmConfig = {};
+                swarmConfig.time_created = new Date().getTime();
+                swarmConfig.width = req.query.width;
+                swarmConfig.length = req.query.length;
+                swarmConfig.ip = ip;
                 // generate shaft list
-                temp.shafts = [];
-                for (var i = 0; i < req.query.w; i++) {
-                    for (var j = 0; j < req.query.h; j++) {
-                        if (((i % 5) * 2 + j) % 5 == 0) temp.shafts.push({
+                swarmConfig.shafts = [];
+                swarmConfig.travelData = [];
+                for (var i = 0; i < req.query.width; i++) {
+                    for (var j = 0; j < req.query.length; j++) {
+                        if (((i % 5) * 2 + j) % 5 == 0) swarmConfig.shafts.push({
                             x: i,
                             z: j
                         });
                     }
                 }
-                temp.claimed = [];
-                temp.done = [];
-                db[req.params.swarmid] = temp;
+                swarmConfig.claimed = [];
+                swarmConfig.done = [];
+                db[req.params.swarmid] = swarmConfig;
                 savedb();
                 res.send({
                     success: "swarm created",
@@ -161,25 +171,14 @@ handlers.swarmcommand = function(req, res) {
         // claim a shaft for a turtle
         case "claimshaft":
             {
-                if (auth_token && auth_token != req.query.token) {
-                    res.send({
-                        error: "invalid token"
-                    });
+                if (!checks()) {
                     break;
-                }
-                if (iplock && ip != db[req.params.swarmid].ip) {
-                    res.send({
-                        error: "ip mismatch"
-                    });
-                    break;
-                }
-                if (!db[req.params.swarmid]) {
+                } else if (!db[req.params.swarmid]) {
                     res.send({
                         error: "swarm does not exist"
                     });
                     break;
-                }
-                if (!req.query.id) {
+                } else if (req.query.id == undefined) {
                     res.send({
                         error: "missing parameters"
                     });
@@ -189,19 +188,19 @@ handlers.swarmcommand = function(req, res) {
                 if (shaft) {
                     res.send({
                         success: shaft,
-                        done: (db[req.params.swarmid].shafts.length == 0)
+                        remaining: db[req.params.swarmid].shafts.length
                     });
                     shaft.claimed_time = new Date().getTime();
                     shaft.claimed_by = req.query.id;
                     db[req.params.swarmid].claimed.push(shaft);
-                    if (logging >= 2) console.log("Shaft (" + shaft.x + ", " + shaft.z + ") claimed in swarm '" + req.params.swarmid + "' by turtle " + req.query.id);
+                    if (logging >= 2) console.log("Shaft (" + shaft.x + ", " + shaft.z + ") claimed in swarm '" + req.params.swarmid + "' by turtle " + req.query.id + " (" + db[req.params.swarmid].shafts.length + " remaining)");
                     savedb();
                     break;
                 }
                 else {
                     res.send({
                         error: "no remaining shafts",
-                        done: true
+                        remaining: 0
                     });
                     break;
                 }
@@ -210,25 +209,14 @@ handlers.swarmcommand = function(req, res) {
         // mark a shaft as finished
         case "finishedshaft":
             {
-                if (auth_token && auth_token != req.query.token) {
-                    res.send({
-                        error: "invalid token"
-                    });
+                if (!checks()) {
                     break;
-                }
-                if (iplock && ip != db[req.params.swarmid].ip) {
-                    res.send({
-                        error: "ip mismatch"
-                    });
-                    break;
-                }
-                if (!db[req.params.swarmid]) {
+                } else if (!db[req.params.swarmid]) {
                     res.send({
                         error: "swarm does not exist"
                     });
                     break;
-                }
-                if (!(req.query.x && req.query.z)) {
+                } else if (!(req.query.x && req.query.z)) {
                     res.send({
                         error: "missing parameters"
                     });
@@ -263,6 +251,133 @@ handlers.swarmcommand = function(req, res) {
                     });
                     break;
                 }
+            }
+
+        // add the specified location to the travel queue
+        case "travel":
+            {
+                if (!checks()) {
+                    break;
+                } else if (!db[req.params.swarmid]) {
+                    res.send({
+                        error: "swarm does not exist"
+                    });
+                    break;
+                } else if (req.query.id == undefined || req.query.destX == undefined || req.query.destY == undefined || req.query.destZ == undefined || req.query.startX == undefined || req.query.startY == undefined && req.query.startZ != undefined) {
+                    res.send({
+                        error: "missing parameters"
+                    });
+                    break;
+                }
+
+                var posData = {
+                    dest: {
+                        x: req.query.destX,
+                        // y: req.query.destY,
+                        z: req.query.destZ
+                    },
+                    start: {
+                        x: req.query.fromX,
+                        // y: req.query.fromY,
+                        z: req.query.fromZ
+                    }
+                }
+
+                // return true if line segments AB and CD intersect
+                var intersect = function(A, B, C, D) {
+                    var ccw = function (A,B,C) {
+                        return (C.y - A.y) * (B.x - A.x) > (B.y - A.y) * (C.x - A.x)
+                    }
+                    return ccw(A, C, D) != ccw(B, C, D) && ccw(A, B, C) != ccw(A, B, D)
+                }
+
+                var travelData = db[req.params.swarmid].travelData;
+                var intersectExists = false;
+                for (var i = 0; i < travelData.length; i++) {
+                    var t = travelData[i];
+                    if (!t || i == req.query.id) { continue; } // skip if comparing to self
+                    var a1 = {
+                        x: posData.start.x,
+                        y: posData.start.z
+                    }
+                    var b1 = {
+                        x: posData.dest.x,
+                        y: posData.start.z
+                    }
+                    var c1 = {
+                        x: t.start.x,
+                        y: t.start.z
+                    }
+                    var d1 = {
+                        x: t.dest.x,
+                        y: t.start.z
+                    }
+
+                    var a2 = {
+                        x: posData.dest.x,
+                        y: posData.start.z
+                    }
+                    var b2 = {
+                        x: posData.dest.x,
+                        y: posData.dest.z
+                    }
+                    var c2 = {
+                        x: t.dest.x,
+                        y: t.start.z
+                    }
+                    var d2 = {
+                        x: t.dest.x,
+                        y: t.dest.z
+                    }
+
+                    if (intersect(a1, b1, c1, d1) || intersect(a1, b1, c2, d2) || intersect(a2, b2, c1, d1) || intersect(a2, b2, c2, d2)) {
+                        intersectExists = true;
+                        break;
+                    }
+                }
+                if (intersectExists) {
+                    res.send({
+                        error: "travel path intersects with queued path"
+                    });
+                    break;
+                } else {
+                    db[req.params.swarmid].travelData[req.query.id] = posData;
+                    savedb();
+                    res.send({
+                        success: true
+                    });
+                }
+                break;
+            }
+
+        // remove the specified location to the travel queue
+        case "traveldone":
+            {
+                if (!checks()) {
+                    break;
+                } else if (!db[req.params.swarmid]) {
+                    res.send({
+                        error: "swarm does not exist"
+                    });
+                    break;
+                } else if (req.query.id == undefined) {
+                    res.send({
+                        error: "missing parameters"
+                    });
+                    break;
+                } else if (!db[req.params.swarmid].travelData[req.query.id]) {
+                    res.send({
+                        success: true,
+                        error: "travel id not exist"
+                    });
+                    break;
+                }
+                db[req.params.swarmid].travelData[req.query.id] = null;
+                savedb();
+                res.send({
+                    success: true
+                });
+                break;
             }
 
         default:
